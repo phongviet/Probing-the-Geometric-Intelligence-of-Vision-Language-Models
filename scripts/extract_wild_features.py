@@ -58,7 +58,15 @@ class ExtractionWildDataset(GIQBase):
                 continue
 
             group = self.shapes.get(shape_id, {}).get("group", "")
-            wild_paths = get_wild_image_paths(self.renderings_root, group, shape_id)
+
+            # Inject "wild_images" and the group name into the path
+            shape_dir = self.renderings_root / "wild_images" / group / shape_id
+
+            wild_paths = []
+            if shape_dir.exists() and shape_dir.is_dir():
+                # Grab common image formats
+                for ext in ["*.jpg", "*.jpeg", "*.png", "*.JPG", "*.PNG"]:
+                    wild_paths.extend(list(shape_dir.glob(ext)))
 
             if not wild_paths:
                 continue
