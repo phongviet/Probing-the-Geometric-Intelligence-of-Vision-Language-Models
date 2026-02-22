@@ -18,6 +18,7 @@ from torch.utils.data import DataLoader
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 
+# ruff: noqa: E402
 from src.data import MentalRotationDataset, SymmetryDataset, NormalsDataset
 
 # --- create dummy renderings directory -----------------------------------

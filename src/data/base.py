@@ -66,6 +66,22 @@ def image_path(renderings_root: Path, shape_id: str, view_idx: int) -> Path:
     return candidates[0]
 
 
+def get_wild_image_paths(
+    renderings_root: Path, group: str, shape_id: str
+) -> list[Path]:
+    """
+    Return a list of all wild images for a given shape_id.
+    """
+    wild_dir = renderings_root / "wild_images" / group / shape_id
+    if not wild_dir.exists():
+        return []
+
+    images = []
+    for ext in ["*.JPG", "*.jpg", "*.png", "*.JPEG", "*.jpeg"]:
+        images.extend(list(wild_dir.rglob(ext)))
+    return sorted(images)
+
+
 class GIQBase(Dataset, ABC):
     """Abstract base — loads split metadata and exposes helpers."""
 
@@ -87,6 +103,13 @@ class GIQBase(Dataset, ABC):
     def _load_image(self, shape_id: str, view_idx: int) -> torch.Tensor:
         """Load and transform a single rendered view."""
         path = image_path(self.renderings_root, shape_id, view_idx)
+        img = Image.open(path).convert("RGB")
+        if self.transform:
+            img = self.transform(img)
+        return img
+
+    def _load_wild_image(self, path: Path) -> torch.Tensor:
+        """Load and transform a single wild image."""
         img = Image.open(path).convert("RGB")
         if self.transform:
             img = self.transform(img)

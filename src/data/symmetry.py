@@ -34,7 +34,7 @@ from typing import Any
 
 import torch
 
-from .base import GIQBase, DEFAULT_TRANSFORM
+from .base import GIQBase, DEFAULT_TRANSFORM, get_wild_image_paths
 
 # ---------------------------------------------------------------------------
 # Symmetry taxonomy
@@ -77,11 +77,13 @@ class SymmetryDataset(GIQBase):
         self,
         split: str = "train",
         views_per_shape: int = 4,
+        image_type: str = "synthetic",
         renderings_root: str | Path | None = None,
         transform=DEFAULT_TRANSFORM,
         seed: int = 42,
     ):
         super().__init__(split, renderings_root, transform)
+        self.image_type = image_type
 
         import random
 
@@ -91,7 +93,16 @@ class SymmetryDataset(GIQBase):
         for sid in self.shape_ids:
             meta = self.shapes[sid]
             sym_vec = _parse_sym(meta.get("sym"))
-            all_views = meta.get("viewpoints", list(range(20)))
+
+            if self.image_type == "wild":
+                all_views = get_wild_image_paths(
+                    self.renderings_root, meta.get("group", ""), sid
+                )
+            else:
+                all_views = meta.get("viewpoints", list(range(20)))
+
+            if not all_views:
+                continue
 
             n = min(views_per_shape, len(all_views))
             chosen = rng.sample(all_views, n)
@@ -116,16 +127,24 @@ class SymmetryDataset(GIQBase):
 
     def __getitem__(self, idx: int) -> dict[str, Any]:
         s = self._samples[idx]
-        image = self._load_image(s["shape_id"], s["view"])
+
+        if self.image_type == "wild":
+            image = self._load_wild_image(s["view"])
+        else:
+            image = self._load_image(s["shape_id"], s["view"])
+
         label = torch.tensor(
             s["sym_vec"], dtype=torch.float
         )  # BCEWithLogitsLoss expects float
+
+        # Convert Path object to string if it's a wild image view
+        view_id = str(s["view"]) if self.image_type == "wild" else s["view"]
 
         return {
             "image": image,
             "label": label,
             "shape_id": s["shape_id"],
-            "view": s["view"],
+            "view": view_id,
             "group": s["group"],
             "name": s["name"],
         }
