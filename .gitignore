@@ -1,4 +1,8 @@
-/data/
+/data/*
+!/data/giq/
+/data/giq/*
+!/data/giq/splits/
+
 /.idea/
 AGENTS.md
 /experiments/
