@@ -29,18 +29,18 @@ def main():
         if "global_features" not in data or "local_features" not in data:
             print("  ERROR: Missing keys 'global_features' or 'local_features'")
         else:
-            g = data["global_features"]
-            l = data["local_features"]
-            print(f"  Global shape: {g.shape} (Expected: [20, D])")
-            print(f"  Local shape: {l.shape} (Expected: [20, N, D])")
+            g_feat = data["global_features"]
+            l_feat = data["local_features"]
+            print(f"  Global shape: {g_feat.shape} (Expected: [20, D])")
+            print(f"  Local shape: {l_feat.shape} (Expected: [20, N, D])")
 
-            if g.shape[0] != 20:
+            if g_feat.shape[0] != 20:
                 print(
-                    f"  WARNING: Global features batch dim is {g.shape[0]}, expected 20"
+                    f"  WARNING: Global features batch dim is {g_feat.shape[0]}, expected 20"
                 )
-            if l.shape[0] != 20:
+            if l_feat.shape[0] != 20:
                 print(
-                    f"  WARNING: Local features batch dim is {l.shape[0]}, expected 20"
+                    f"  WARNING: Local features batch dim is {l_feat.shape[0]}, expected 20"
                 )
 
     except Exception as e:

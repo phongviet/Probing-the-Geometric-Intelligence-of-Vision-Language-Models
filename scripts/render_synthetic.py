@@ -21,8 +21,6 @@ Usage:
 import argparse
 import json
 import math
-import os
-import random
 import sys
 from pathlib import Path
 
@@ -61,7 +59,7 @@ def fibonacci_hemisphere(n: int, seed: int = 42) -> list[tuple[float, float, flo
     Fibonacci-lattice (golden-ratio) approach.
     Returns list of (x, y, z) unit vectors with z >= 0.
     """
-    rng = random.Random(seed)
+    # rng = random.Random(seed)
     golden = (1 + math.sqrt(5)) / 2
     points = []
     for i in range(n):

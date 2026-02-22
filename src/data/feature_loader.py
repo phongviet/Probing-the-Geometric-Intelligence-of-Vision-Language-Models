@@ -8,14 +8,11 @@ Also provides a FeatureDataset wrapper mixin that replaces image loading with fe
 from __future__ import annotations
 
 import warnings
-from pathlib import Path
-from typing import Any
 
 import numpy as np
 import torch
-from torch.utils.data import Dataset
 
-from src.data.base import REPO_ROOT, GIQBase
+from src.data.base import REPO_ROOT
 from src.data.mental_rotation import MentalRotationDataset
 from src.data.symmetry import SymmetryDataset
 from src.data.normals import NormalsDataset
@@ -42,15 +39,29 @@ class FeatureLoader:
         self.split = split
         self.layer = layer
 
+        # Map short names to directory names
+        # TODO: Unify this with extract_features.py
+        self.dir_map = {
+            "clip": "openai__clip-vit-base-patch16",
+            "siglip2": "google__siglip2-base-patch16-224",
+            "dinov3": "facebook__dinov3-vitb16-pretrain-lvd1689m",
+        }
+
+        dir_name = self.dir_map.get(backbone, backbone)
+
         # Determine feature root
         # Try specific split folder first
-        self.root = REPO_ROOT / "data" / "giq" / "features" / backbone / split
+        self.root = REPO_ROOT / "data" / "giq" / "features" / dir_name / split
         if not self.root.exists():
             # Fallback to backbone root
-            self.root = REPO_ROOT / "data" / "giq" / "features" / backbone
+            self.root = REPO_ROOT / "data" / "giq" / "features" / dir_name
             if not self.root.exists():
                 warnings.warn(f"Feature directory not found: {self.root}")
 
+        self._cache = {}
+
+    def clear_cache(self):
+        """Clear the internal feature cache."""
         self._cache = {}
 
     def has_features(self, shape_id: str) -> bool:
@@ -122,50 +133,11 @@ class FeatureLoader:
         return torch.from_numpy(feats[view_idx]).float()
 
 
-class FeatureDatasetMixin:
-    """
-    Mixin to override _load_image with feature loading.
-    """
-
+class FeatureMentalRotationDataset(MentalRotationDataset):
     def __init__(self, *args, backbone: str = "clip", layer: str = "global", **kwargs):
-        # Initialize the base dataset (e.g., MentalRotationDataset)
-        # We need to filter out kwargs that belong to FeatureDatasetMixin
-        # before calling super().__init__, but here we use *args, **kwargs to pass through.
-        # However, super().__init__ might complain about extra kwargs.
-        # So we should probably capture them.
-
-        # Initialize loader
-        # We need 'split' to initialize FeatureLoader, but 'split' is usually passed to Dataset.
-        # We can extract it from args if position 0, or kwargs 'split'.
-        split = kwargs.get("split", args[0] if args else "train")
-
-        self.feature_loader = FeatureLoader(backbone=backbone, split=split, layer=layer)
-
-        # Remove feature-specific args from kwargs before calling super
-        # But wait, python MRO initialization is tricky with Mixins.
-        # Usually Mixins are first in MRO.
         super().__init__(*args, **kwargs)
-
-    def _load_image(self, shape_id: str, view_idx: int) -> torch.Tensor:
-        """
-        Override standard image loading to return features.
-        """
-        return self.feature_loader.get_features(shape_id, view_idx)
-
-
-# ---------------------------------------------------------------------------
-# Feature-based Dataset Wrappers
-# ---------------------------------------------------------------------------
-
-
-class FeatureMentalRotationDataset(FeatureDatasetMixin, MentalRotationDataset):
-    def __init__(self, *args, backbone="clip", layer="global", **kwargs):
-        # We must explicitly handle init to pass arguments correctly to both parents
-        # FeatureDatasetMixin.__init__ handles the loader creation
-        # MentalRotationDataset.__init__ handles the pair generation
-        FeatureDatasetMixin.__init__(
-            self, *args, backbone=backbone, layer=layer, **kwargs
-        )
+        split = kwargs.get("split", args[0] if args else "train")
+        self.feature_loader = FeatureLoader(backbone=backbone, split=split, layer=layer)
 
         # Filter pairs to only include available shapes
         if hasattr(self, "_pairs"):
@@ -197,12 +169,58 @@ class FeatureMentalRotationDataset(FeatureDatasetMixin, MentalRotationDataset):
                     f"Filtered {initial_len - final_len} pairs due to missing/incomplete features. Remaining: {final_len}"
                 )
 
+        # Clear cache to free memory and prevent pickle errors with multiprocessing
+        self.feature_loader.clear_cache()
 
-class FeatureSymmetryDataset(FeatureDatasetMixin, SymmetryDataset):
-    def __init__(self, *args, backbone="clip", layer="global", **kwargs):
-        FeatureDatasetMixin.__init__(
-            self, *args, backbone=backbone, layer=layer, **kwargs
-        )
+    def _load_image(self, shape_id: str, view_idx: int) -> torch.Tensor:
+        """Override standard image loading to return features."""
+        return self.feature_loader.get_features(shape_id, view_idx)
+
+
+class FeatureSymmetryDataset(SymmetryDataset):
+    def __init__(self, *args, backbone: str = "clip", layer: str = "global", **kwargs):
+        super().__init__(*args, **kwargs)
+        split = kwargs.get("split", args[0] if args else "train")
+        self.feature_loader = FeatureLoader(backbone=backbone, split=split, layer=layer)
+
+        # Filter samples
+        if hasattr(self, "_samples"):
+            initial_len = len(self._samples)
+            new_samples = []
+            for s in self._samples:
+                sid = s["shape_id"]
+                v = s["view"]
+
+                if not self.feature_loader.has_features(sid):
+                    continue
+
+                try:
+                    n = self.feature_loader.get_num_views(sid)
+                    if v < n:
+                        new_samples.append(s)
+                except Exception:
+                    continue
+
+            self._samples = new_samples
+            final_len = len(self._samples)
+            if final_len < initial_len:
+                print(
+                    f"Filtered {initial_len - final_len} samples due to missing/incomplete features. Remaining: {final_len}"
+                )
+
+        # Clear cache to free memory
+        self.feature_loader.clear_cache()
+
+    def _load_image(self, shape_id: str, view_idx: int) -> torch.Tensor:
+        """Override standard image loading to return features."""
+        return self.feature_loader.get_features(shape_id, view_idx)
+
+
+class FeatureNormalsDataset(NormalsDataset):
+    def __init__(self, *args, backbone: str = "clip", layer: str = "local", **kwargs):
+        super().__init__(*args, **kwargs)
+        split = kwargs.get("split", args[0] if args else "train")
+        self.feature_loader = FeatureLoader(backbone=backbone, split=split, layer=layer)
 
         # Filter samples
         if hasattr(self, "_samples"):
@@ -229,35 +247,9 @@ class FeatureSymmetryDataset(FeatureDatasetMixin, SymmetryDataset):
                     f"Filtered {initial_len - final_len} samples due to missing/incomplete features. Remaining: {final_len}"
                 )
 
+        # Clear cache to free memory
+        self.feature_loader.clear_cache()
 
-class FeatureNormalsDataset(FeatureDatasetMixin, NormalsDataset):
-    def __init__(self, *args, backbone="clip", layer="local", **kwargs):
-        # Normals task typically requires local features (patch tokens)
-        FeatureDatasetMixin.__init__(
-            self, *args, backbone=backbone, layer=layer, **kwargs
-        )
-
-        # Filter samples
-        if hasattr(self, "_samples"):
-            initial_len = len(self._samples)
-            new_samples = []
-            for s in self._samples:
-                sid = s["shape_id"]
-                v = s["view"]
-
-                if not self.feature_loader.has_features(sid):
-                    continue
-
-                try:
-                    n = self.feature_loader.get_num_views(sid)
-                    if v < n:
-                        new_samples.append(s)
-                except Exception:
-                    continue
-
-            self._samples = new_samples
-            final_len = len(self._samples)
-            if final_len < initial_len:
-                print(
-                    f"Filtered {initial_len - final_len} samples due to missing/incomplete features. Remaining: {final_len}"
-                )
+    def _load_image(self, shape_id: str, view_idx: int) -> torch.Tensor:
+        """Override standard image loading to return features."""
+        return self.feature_loader.get_features(shape_id, view_idx)

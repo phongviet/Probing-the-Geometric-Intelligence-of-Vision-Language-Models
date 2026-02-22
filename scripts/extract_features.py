@@ -7,7 +7,7 @@ from typing import Any
 
 import numpy as np
 import torch
-from torch.utils.data import DataLoader, Dataset
+from torch.utils.data import DataLoader
 from tqdm import tqdm
 
 # Add src to path
@@ -134,7 +134,7 @@ def main():
         model_name = args.model_name or "google/siglip2-base-patch16-224"
         featurizer = SigLIP2Featurizer(model_name=model_name, device=device)
     elif args.model == "dinov3":
-        model_name = args.model_name or "facebook/dinov3-base"
+        model_name = args.model_name or "facebook/dinov3-vitb16-pretrain-lvd1689m"
         featurizer = DINOv3Featurizer(model_name=model_name, device=device)
     else:
         raise ValueError(f"Unknown model: {args.model}")
@@ -173,44 +173,17 @@ def main():
     # The dataset yields (shape_id, view_idx). The loader shuffles? No, shuffle=False.
     # Since shuffle=False and we iterate shape by shape, we can buffer features.
 
-    current_shape_id = None
-    buffer_global = []  # List of [D] tensors
-    buffer_local = []  # List of [N, D] tensors
-    buffer_views = []  # List of view indices
-
-    dtype_context = (
-        torch.autocast(device_type="cuda", dtype=torch.float16)
-        if args.fp16
-        else torch.no_grad()
-    )  # no_grad is context manager too but doesn't do autocast
-
-    # We need to handle the loop carefully to save when shape changes.
-    # Or simply save every batch and then merge? No, better to save per shape.
-    # Since dataset is ordered by shape_id, we can accumulate.
-
-    def save_buffer(s_id, glob, loc, views):
-        if not s_id:
-            return
-
-        # Sort by view_idx to ensure 0..19 order
-        # (Though dataset is ordered, batching might slightly mix if we didn't handle it,
-        # but with shuffle=False and sequential batching, it should be fine.
-        # But wait, batch can span across two shapes.
-
-        # We need to handle accumulation robustly.
-        # Actually, saving individual .npz files for each shape containing all 20 views is the goal.
-        # "Save features efficiently as compressed .npz files, organized by shape_id."
-
-        # Let's accumulate in a dictionary: shape_id -> {view_idx -> features}
-        pass
-
-    # Better approach:
-    # Since the dataset is strictly ordered (shape A view 0..19, shape B view 0..19...),
-    # we can just accumulate until we hit 20 views for a shape.
-    # But batch size might not align with 20.
-
     # Let's use a dict buffer: keys = shape_id
     shape_buffers = {}  # shape_id -> {'global': [], 'local': [], 'views': []}
+
+    print("Starting inference...")
+
+    # Enable mixed precision if requested
+    dtype_ctx = (
+        torch.autocast(device_type="cuda", dtype=torch.float16)
+        if args.fp16 and "cuda" in device
+        else torch.no_grad()  # fallback context manager (no-op effectively for dtype)
+    )
 
     for batch in tqdm(loader):
         images = batch["image"].to(device)
@@ -218,10 +191,7 @@ def main():
         view_idxs = batch["view_idx"]
 
         with torch.no_grad():
-            if args.fp16 and "cuda" in device:
-                with torch.autocast(device_type="cuda", dtype=torch.float16):
-                    features = featurizer(images)
-            else:
+            with dtype_ctx:
                 features = featurizer(images)
 
         # Move to CPU
@@ -231,16 +201,14 @@ def main():
         for i, sid in enumerate(shape_ids):
             vid = int(view_idxs[i])
 
-            # Check if file already exists (resumability)
-            # Optimization: check this before inference?
-            # If we check before inference, we can't batch efficiently unless we use a custom sampler
-            # or filter the dataset.
-            # For now, let's just check before writing.
-            # Or better: Filter the dataset beforehand?
-            # Creating the dataset takes time if we check 20 files per shape.
-            # Checking one file per shape (the .npz) is fast.
-
             save_path = output_dir / f"{sid}.npz"
+
+            # If the file already exists, we don't need to process it.
+            # However, we've already computed the features for this batch.
+            # The efficient way is to not even run inference for these, but
+            # since we filter at dataset level (lines 48-56), we shouldn't see
+            # already processed shapes here unless there's a race condition or partial run.
+            # We'll keep the check for safety.
             if save_path.exists():
                 continue
 
@@ -252,18 +220,31 @@ def main():
             shape_buffers[sid]["views"].append(vid)
 
             # Check if we have all 20 views
+            # Note: This assumes we see all 20 views. If a batch splits them,
+            # the buffer persists across batches.
             if len(shape_buffers[sid]["views"]) == 20:
-                # Sort by view index
-                indices = np.argsort(shape_buffers[sid]["views"])
-                g_sorted = np.stack(shape_buffers[sid]["global"])[indices]
-                l_sorted = np.stack(shape_buffers[sid]["local"])[indices]
+                # Sort by view index to ensure correct order 0..19
+                # (The dataset yields them in order, but good to be safe)
+                views_arr = np.array(shape_buffers[sid]["views"])
+                indices = np.argsort(views_arr)
 
-                # Save
+                # Stack and sort
+                # global_feats[i] is [D], so stack -> [20, D]
+                g_stack = np.stack(shape_buffers[sid]["global"])
+                l_stack = np.stack(shape_buffers[sid]["local"])
+
+                g_sorted = g_stack[indices]
+                l_sorted = l_stack[indices]
+
+                # Save compressed
                 np.savez_compressed(
-                    save_path, global_features=g_sorted, local_features=l_sorted
+                    save_path,
+                    global_features=g_sorted,
+                    local_features=l_sorted,
+                    shape_id=sid,
                 )
 
-                # Clear buffer
+                # Clear buffer for this shape
                 del shape_buffers[sid]
 
     # Flush any remaining (shouldn't be any if all have 20 views, but for safety)
@@ -272,13 +253,15 @@ def main():
             print(
                 f"Warning: Incomplete views for {sid} (found {len(buf['views'])}). Saving anyway."
             )
-            indices = np.argsort(buf["views"])
+            views_arr = np.array(buf["views"])
+            indices = np.argsort(views_arr)
             g_sorted = np.stack(buf["global"])[indices]
             l_sorted = np.stack(buf["local"])[indices]
             np.savez_compressed(
                 output_dir / f"{sid}.npz",
                 global_features=g_sorted,
                 local_features=l_sorted,
+                shape_id=sid,
             )
 
 

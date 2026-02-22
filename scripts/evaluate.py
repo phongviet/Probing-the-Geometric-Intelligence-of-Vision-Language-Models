@@ -13,10 +13,9 @@ from pathlib import Path
 
 import numpy as np
 import torch
-import torch.nn as nn
 from torch.utils.data import DataLoader
 from tqdm import tqdm
-from sklearn.metrics import accuracy_score, f1_score, precision_score, recall_score
+from sklearn.metrics import accuracy_score, f1_score
 
 # Add src to path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
@@ -27,6 +26,41 @@ from src.data.feature_loader import (
     FeatureNormalsDataset,
 )
 from src.models.probes import LinearProbe, MLPProbe, DenseProbe
+
+
+def handle_extra_tokens(x):
+    B, N, D = x.shape
+
+    # Check for N=H*W (no extra tokens)
+    H_p = int(N**0.5)
+    if H_p * H_p == N:
+        return x, H_p
+
+    # Check for N=H*W + 1 (CLS token)
+    H_p = int((N - 1) ** 0.5)
+    if (H_p * H_p) + 1 == N:
+        return x[:, 1:, :], H_p
+
+    # Check for registers (e.g. N=200 -> 196 + 4)
+    possible_tokens = [i * i for i in range(1, int(N**0.5) + 2)]
+    valid_squares = [sq for sq in possible_tokens if sq <= N]
+
+    if valid_squares:
+        target_sq = valid_squares[-1]
+        H_p = int(target_sq**0.5)
+        extra_tokens = N - target_sq
+        if extra_tokens > 0:
+            return x[:, extra_tokens:, :], H_p
+
+    # Fallback
+    return x, int(N**0.5)
+
+
+def pool_features(x: torch.Tensor) -> torch.Tensor:
+    if x.dim() == 3:
+        x, _ = handle_extra_tokens(x)
+        return x.mean(dim=1)
+    return x
 
 
 def get_dataset(task, backbone, layer, split, **kwargs):
@@ -118,14 +152,14 @@ def main():
     # Infer input dimension
     sample = test_ds[0]
     if args.task == "rotation":
-        feat_dim = sample["img_a"].shape[-1]
+        feat_dim = pool_features(sample["img_a"]).shape[-1]
         if args.combine_method == "concat":
             input_dim = feat_dim * 2
         else:
             input_dim = feat_dim
         num_classes = 2
     elif args.task == "symmetry":
-        feat_dim = sample["image"].shape[-1]
+        feat_dim = pool_features(sample["image"]).shape[-1]
         input_dim = feat_dim
         num_classes = 3
     elif args.task == "normals":
@@ -175,8 +209,8 @@ def main():
     with torch.no_grad():
         for batch in tqdm(test_loader, desc="Evaluating"):
             if args.task == "rotation":
-                f_a = batch["img_a"].to(args.device)
-                f_b = batch["img_b"].to(args.device)
+                f_a = pool_features(batch["img_a"].to(args.device))
+                f_b = pool_features(batch["img_b"].to(args.device))
                 labels = batch["label"].to(args.device)
 
                 if args.combine_method == "concat":
@@ -185,6 +219,8 @@ def main():
                     x = torch.abs(f_a - f_b)
                 elif args.combine_method == "mult":
                     x = f_a * f_b
+                else:
+                    raise ValueError(f"Unknown combine_method: {args.combine_method}")
 
                 logits = model(x)
                 preds = torch.argmax(logits, dim=1)
@@ -193,7 +229,7 @@ def main():
                 all_labels.extend(labels.cpu().numpy())
 
             elif args.task == "symmetry":
-                x = batch["image"].to(args.device)
+                x = pool_features(batch["image"].to(args.device))
                 labels = batch["label"].to(args.device)
 
                 logits = model(x)
@@ -207,14 +243,8 @@ def main():
                 gt_normals = batch["normals"].to(args.device)
                 mask = batch["mask"].to(args.device)
 
-                # Handle CLS token
-                B, N, D = x.shape
-                H_p = int((N - 1) ** 0.5)
-                if (H_p * H_p) + 1 == N:
-                    x = x[:, 1:, :]
-                    N = N - 1
-                else:
-                    H_p = int(N**0.5)
+                # Handle CLS token and registers
+                x, H_p = handle_extra_tokens(x)
 
                 logits = model(x)
 

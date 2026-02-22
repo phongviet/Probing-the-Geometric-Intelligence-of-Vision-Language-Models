@@ -44,6 +44,37 @@ def get_dataset(task, backbone, layer, split, **kwargs):
         raise ValueError(f"Unknown task: {task}")
 
 
+def handle_extra_tokens(x: torch.Tensor) -> tuple[torch.Tensor, int]:
+    B, N, D = x.shape
+
+    H_p = int(N**0.5)
+    if H_p * H_p == N:
+        return x, H_p
+
+    H_p = int((N - 1) ** 0.5)
+    if (H_p * H_p) + 1 == N:
+        return x[:, 1:, :], H_p
+
+    possible_tokens = [i * i for i in range(1, int(N**0.5) + 2)]
+    valid_squares = [sq for sq in possible_tokens if sq <= N]
+
+    if valid_squares:
+        target_sq = valid_squares[-1]
+        H_p = int(target_sq**0.5)
+        extra_tokens = N - target_sq
+        if extra_tokens > 0:
+            return x[:, extra_tokens:, :], H_p
+
+    return x, int(N**0.5)
+
+
+def pool_features(x: torch.Tensor) -> torch.Tensor:
+    if x.dim() == 3:
+        x, _ = handle_extra_tokens(x)
+        return x.mean(dim=1)
+    return x
+
+
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument(
@@ -74,6 +105,9 @@ def main():
     parser.add_argument("--output_dir", type=str, default="experiments/probes")
     args = parser.parse_args()
 
+    if args.task == "normals" and args.layer != "local":
+        raise ValueError("Normals task requires --layer local")
+
     # Determine dimensions
     # Assume standard dimensions for now, or infer from first batch
     # CLIP/SigLIP: 768 (ViT-B), DINOv3: 768 (ViT-B)
@@ -81,7 +115,8 @@ def main():
     # We should infer input_dim dynamically.
 
     print(
-        f"Loading {args.task} dataset with {args.backbone} features ({args.layer})..."
+        f"Loading {args.task} dataset with {args.backbone} features ({args.layer})...",
+        flush=True,
     )
     train_ds = get_dataset(args.task, args.backbone, args.layer, "train")
     val_ds = get_dataset(args.task, args.backbone, args.layer, "val")
@@ -96,9 +131,9 @@ def main():
     # Infer input dimension from a sample
     sample = train_ds[0]
     if args.task == "rotation":
-        feat_dim = sample["img_a"].shape[-1]
+        feat_dim = pool_features(sample["img_a"]).shape[-1]
     elif args.task == "symmetry":
-        feat_dim = sample["image"].shape[-1]
+        feat_dim = pool_features(sample["image"]).shape[-1]
     elif args.task == "normals":
         feat_dim = sample["image"].shape[-1]  # shape is [N, D] or [D]
 
@@ -119,7 +154,7 @@ def main():
         loss_fn = nn.L1Loss()  # Or CosineSimilarity
         input_dim = feat_dim
 
-    print(f"Input dimension: {input_dim}")
+    print(f"Input dimension: {input_dim}", flush=True)
 
     if args.probe == "linear":
         model = LinearProbe(input_dim, num_classes)
@@ -146,11 +181,18 @@ def main():
         correct = 0
         total = 0
 
-        pbar = tqdm(train_loader, desc=f"Epoch {epoch + 1}/{args.epochs}")
+        pbar = tqdm(
+            train_loader,
+            desc=f"Epoch {epoch + 1}/{args.epochs}",
+            ascii=True,
+            dynamic_ncols=True,
+            mininterval=1.0,
+            file=sys.stdout,
+        )
         for batch in pbar:
             if args.task == "rotation":
-                f_a = batch["img_a"].to(args.device)
-                f_b = batch["img_b"].to(args.device)
+                f_a = pool_features(batch["img_a"].to(args.device))
+                f_b = pool_features(batch["img_b"].to(args.device))
                 labels = batch["label"].to(args.device)
 
                 if args.combine_method == "concat":
@@ -161,7 +203,7 @@ def main():
                     x = f_a * f_b
 
             elif args.task == "symmetry":
-                x = batch["image"].to(args.device)
+                x = pool_features(batch["image"].to(args.device))
                 labels = batch["label"].to(args.device)
 
             elif args.task == "normals":
@@ -170,18 +212,7 @@ def main():
                 gt_normals = batch["normals"].to(args.device)
                 mask = batch["mask"].to(args.device)
 
-                # Handle CLS token if present (e.g., N=197 for ViT-B/16)
-                B, N, D = x.shape
-                H_p = int((N - 1) ** 0.5)
-                if (H_p * H_p) + 1 == N:
-                    x = x[:, 1:, :]  # Drop CLS token
-                    N = N - 1
-                else:
-                    H_p = int(N**0.5)
-                    if H_p * H_p != N:
-                        # Fallback or error? Maybe reshape is not square?
-                        # Just proceed and let reshape fail if so.
-                        pass
+                x, H_p = handle_extra_tokens(x)
 
             optimizer.zero_grad()
             logits = model(x)
@@ -204,7 +235,8 @@ def main():
 
                 # Mask out background if available
                 if mask.sum() > 0:
-                    loss = criterion(logits_upsampled[mask], gt_normals[mask])
+                    mask_3d = mask.unsqueeze(1).expand_as(logits_upsampled).bool()
+                    loss = criterion(logits_upsampled[mask_3d], gt_normals[mask_3d])
                 else:
                     loss = torch.tensor(0.0, device=args.device, requires_grad=True)
 
@@ -229,11 +261,15 @@ def main():
                 correct += (preds == labels).all(dim=1).sum().item()
                 total += labels.size(0)
 
-            pbar.set_postfix(loss=loss.item())
+                pbar.set_postfix(loss=loss.item())
+                pbar.refresh()
 
         avg_loss = total_loss / len(train_loader)
-        acc = correct / total if total > 0 else 0.0
-        print(f"Train Loss: {avg_loss:.4f}, Train Acc: {acc:.4f}")
+        if args.task in {"rotation", "symmetry"}:
+            acc = correct / total if total > 0 else 0.0
+            print(f"Train Loss: {avg_loss:.4f}, Train Acc: {acc:.4f}", flush=True)
+        else:
+            print(f"Train Loss: {avg_loss:.4f}, Train Acc: n/a", flush=True)
 
         # Validation
         model.eval()
@@ -244,8 +280,8 @@ def main():
         with torch.no_grad():
             for batch in val_loader:
                 if args.task == "rotation":
-                    f_a = batch["img_a"].to(args.device)
-                    f_b = batch["img_b"].to(args.device)
+                    f_a = pool_features(batch["img_a"].to(args.device))
+                    f_b = pool_features(batch["img_b"].to(args.device))
                     labels = batch["label"].to(args.device)
                     if args.combine_method == "concat":
                         x = torch.cat([f_a, f_b], dim=-1)
@@ -254,21 +290,14 @@ def main():
                     elif args.combine_method == "mult":
                         x = f_a * f_b
                 elif args.task == "symmetry":
-                    x = batch["image"].to(args.device)
+                    x = pool_features(batch["image"].to(args.device))
                     labels = batch["label"].to(args.device)
                 elif args.task == "normals":
                     x = batch["image"].to(args.device)
                     gt_normals = batch["normals"].to(args.device)
                     mask = batch["mask"].to(args.device)
 
-                    # Handle CLS token
-                    B, N, D = x.shape
-                    H_p = int((N - 1) ** 0.5)
-                    if (H_p * H_p) + 1 == N:
-                        x = x[:, 1:, :]  # Drop CLS token
-                        N = N - 1
-                    else:
-                        H_p = int(N**0.5)
+                    x, H_p = handle_extra_tokens(x)
 
                 logits = model(x)
 
@@ -282,7 +311,8 @@ def main():
                         align_corners=False,
                     )
                     if mask.sum() > 0:
-                        loss = criterion(logits_upsampled[mask], gt_normals[mask])
+                        mask_3d = mask.unsqueeze(1).expand_as(logits_upsampled).bool()
+                        loss = criterion(logits_upsampled[mask_3d], gt_normals[mask_3d])
                     else:
                         loss = torch.tensor(0.0, device=args.device)
                 else:
@@ -300,13 +330,16 @@ def main():
                     val_total += labels.size(0)
 
         avg_val_loss = val_loss / len(val_loader)
-        val_acc = val_correct / val_total if val_total > 0 else 0.0
-        print(f"Val Loss: {avg_val_loss:.4f}, Val Acc: {val_acc:.4f}")
+        if args.task in {"rotation", "symmetry"}:
+            val_acc = val_correct / val_total if val_total > 0 else 0.0
+            print(f"Val Loss: {avg_val_loss:.4f}, Val Acc: {val_acc:.4f}", flush=True)
+        else:
+            print(f"Val Loss: {avg_val_loss:.4f}, Val Acc: n/a", flush=True)
 
         if avg_val_loss < best_val_loss:
             best_val_loss = avg_val_loss
             torch.save(model.state_dict(), output_path / "best_model.pth")
-            print("Saved best model.")
+            print("Saved best model.", flush=True)
 
 
 if __name__ == "__main__":

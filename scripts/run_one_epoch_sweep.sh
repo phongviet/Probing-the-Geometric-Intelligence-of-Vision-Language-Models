@@ -1,6 +1,6 @@
 #!/bin/bash
-# scripts/run_experiments.sh
-# Automate training runs for GIQ Probes
+# scripts/run_one_epoch_sweep.sh
+# Run a one-epoch sweep over all training configurations.
 
 # Ensure we are in the project root
 cd "$(dirname "$0")/.."
@@ -10,11 +10,11 @@ LAYERS=("global" "local")
 PROBES=("linear" "mlp")
 ROTATION_COMBINE=("concat" "diff" "mult")
 
-echo "Starting full sweep for backbones: ${BACKBONES[*]}"
+echo "Starting one-epoch sweep for backbones: ${BACKBONES[*]}"
 
 for BACKBONE in "${BACKBONES[@]}"; do
     echo "========================================================"
-    echo "Running experiments for backbone: $BACKBONE"
+    echo "Running one-epoch sweep for backbone: $BACKBONE"
     echo "========================================================"
 
     for LAYER in "${LAYERS[@]}"; do
@@ -30,6 +30,7 @@ for BACKBONE in "${BACKBONES[@]}"; do
                     --layer "$LAYER" \
                     --combine_method "$COMBINE" \
                     --device cuda \
+                    --epochs 1 \
                     --output_dir "$OUTPUT_DIR"
             done
         done
@@ -44,6 +45,7 @@ for BACKBONE in "${BACKBONES[@]}"; do
                 --probe "$PROBE" \
                 --layer "$LAYER" \
                 --device cuda \
+                --epochs 1 \
                 --output_dir "$OUTPUT_DIR"
         done
 
@@ -57,6 +59,7 @@ for BACKBONE in "${BACKBONES[@]}"; do
                 --probe dense \
                 --layer "$LAYER" \
                 --device cuda \
+                --epochs 1 \
                 --output_dir "$OUTPUT_DIR"
         else
             echo "[$BACKBONE][$LAYER] Normals skipped (requires local features)."
@@ -64,4 +67,4 @@ for BACKBONE in "${BACKBONES[@]}"; do
     done
 done
 
-echo "Experiments complete."
+echo "One-epoch sweep complete."

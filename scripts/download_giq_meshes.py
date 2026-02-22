@@ -10,7 +10,6 @@ and extracted to:
     data/giq/renderings/
 """
 
-import os
 import zipfile
 from pathlib import Path
 
@@ -18,7 +17,8 @@ from pathlib import Path
 try:
     import gdown
 except ImportError:
-    import subprocess, sys
+    import subprocess
+    import sys
 
     subprocess.check_call([sys.executable, "-m", "pip", "install", "gdown", "-q"])
     import gdown

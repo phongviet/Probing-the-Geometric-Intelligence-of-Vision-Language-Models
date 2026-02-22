@@ -12,10 +12,8 @@ from pathlib import Path
 
 import matplotlib.pyplot as plt
 import numpy as np
-import torch
 from sklearn.decomposition import PCA
 from sklearn.manifold import TSNE
-from sklearn.metrics.pairwise import cosine_similarity
 
 # Add src to path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))

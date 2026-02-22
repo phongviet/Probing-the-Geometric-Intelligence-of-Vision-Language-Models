@@ -8,7 +8,6 @@ import torch
 import torch.nn as nn
 from transformers import (
     AutoModel,
-    AutoProcessor,
     CLIPModel,
     CLIPProcessor,
     AutoImageProcessor,
@@ -109,7 +108,7 @@ class SigLIP2Featurizer(AbstractFeaturizer):
             )
             raise
 
-        self.processor = AutoProcessor.from_pretrained(model_name)
+        self.processor = AutoImageProcessor.from_pretrained(model_name)
         self.model.eval()
 
     def forward(self, images: torch.Tensor) -> dict[str, torch.Tensor]:
@@ -157,9 +156,14 @@ class DINOv3Featurizer(AbstractFeaturizer):
     """
     DINOv3 featurizer.
     Using facebook/dinov3 checkpoints.
+    Default: facebook/dinov3-vitb16-pretrain-lvd1689m (ViT-Base)
     """
 
-    def __init__(self, model_name: str = "facebook/dinov3-base", device: str = "cuda"):
+    def __init__(
+        self,
+        model_name: str = "facebook/dinov3-vitb16-pretrain-lvd1689m",
+        device: str = "cuda",
+    ):
         super().__init__(model_name, device)
         self.model = AutoModel.from_pretrained(model_name).to(device)
         self.processor = AutoImageProcessor.from_pretrained(model_name)
@@ -168,13 +172,22 @@ class DINOv3Featurizer(AbstractFeaturizer):
     def forward(self, images: torch.Tensor) -> dict[str, torch.Tensor]:
         with torch.no_grad():
             outputs = self.model(pixel_values=images)
-            last_hidden = outputs.last_hidden_state
+            last_hidden = outputs.last_hidden_state  # [B, N, D]
 
-            if last_hidden.shape[1] > 196:  # Assuming patch 16, 224 size
+            # DINOv3 ViT models typically have a CLS token at index 0
+            # Check shape to confirm (e.g. 197 for 224x224 patch 16)
+            if last_hidden.shape[1] > 196:
                 cls_token = last_hidden[:, 0, :]
                 patch_tokens = last_hidden[:, 1:, :]
             else:
-                cls_token = last_hidden.mean(dim=1)
+                # Fallback if no CLS token found or different architecture
+                if (
+                    hasattr(outputs, "pooler_output")
+                    and outputs.pooler_output is not None
+                ):
+                    cls_token = outputs.pooler_output
+                else:
+                    cls_token = last_hidden.mean(dim=1)
                 patch_tokens = last_hidden
 
             return {"global": cls_token, "local": patch_tokens}
@@ -183,9 +196,21 @@ class DINOv3Featurizer(AbstractFeaturizer):
         from torchvision import transforms
 
         try:
-            image_mean = self.processor.image_mean
-            image_std = self.processor.image_std
-            size = self.processor.size["height"]
+            # DINOv3 processor attributes might vary, but typically:
+            # image_mean, image_std, size
+            image_mean = getattr(self.processor, "image_mean", (0.485, 0.456, 0.406))
+            image_std = getattr(self.processor, "image_std", (0.229, 0.224, 0.225))
+
+            if hasattr(self.processor, "size") and "height" in self.processor.size:
+                size = self.processor.size["height"]
+            elif (
+                hasattr(self.processor, "crop_size")
+                and "height" in self.processor.crop_size
+            ):
+                size = self.processor.crop_size["height"]
+            else:
+                size = 224
+
         except (AttributeError, KeyError):
             image_mean = (0.485, 0.456, 0.406)
             image_std = (0.229, 0.224, 0.225)

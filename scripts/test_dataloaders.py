@@ -8,15 +8,19 @@ Creates tiny dummy images on-the-fly so the test works immediately.
 import sys
 import json
 import tempfile
+import warnings
 from pathlib import Path
+
+import numpy as np
+from PIL import Image
+from torch.utils.data import DataLoader
 
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 
-# --- create dummy renderings directory -----------------------------------
-import numpy as np
-from PIL import Image
+from src.data import MentalRotationDataset, SymmetryDataset, NormalsDataset
 
+# --- create dummy renderings directory -----------------------------------
 shapes_path = ROOT / "giq-benchmark" / "jsons" / "shapes.json"
 splits_dir = ROOT / "data" / "giq" / "splits"
 
@@ -32,13 +36,7 @@ for sid in all_shapes.keys():  # all shapes
         arr = np.random.randint(0, 255, (256, 256, 3), dtype=np.uint8)
         Image.fromarray(arr).save(DUMMY_DIR / sid / f"{v:04d}.jpg")
 
-# -------------------------------------------------------------------------
-# Import dataset classes
-# -------------------------------------------------------------------------
-from src.data import MentalRotationDataset, SymmetryDataset, NormalsDataset
-from torch.utils.data import DataLoader
 
-# -------------------------------------------------------------------------
 # 1. Mental Rotation
 # -------------------------------------------------------------------------
 print("\n--- MentalRotationDataset (train, mode=all) ---")
@@ -91,7 +89,6 @@ ds_norm = NormalsDataset(
     normals_root=DUMMY_DIR / "_normals_nonexistent",
 )
 print(f"  Dataset size: {len(ds_norm)}")
-import warnings
 
 with warnings.catch_warnings():
     warnings.simplefilter("ignore")
@@ -111,11 +108,9 @@ print(f"  Batch images: {batch['image'].shape}  normals: {batch['normals'].shape
 # -------------------------------------------------------------------------
 print("\n--- MentalRotationDataset (test, mode=hard) ---")
 # Ensure dummy images exist for all hard-pair shapes
-import json as _json
-
 hard_path = ROOT / "giq-benchmark" / "jsons" / "hard_examples.json"
 with open(hard_path) as f:
-    hard = _json.load(f)
+    hard = json.load(f)
 hard_sids = set()
 for pairs in hard.values():
     for p in pairs:
