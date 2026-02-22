@@ -33,8 +33,10 @@ def get_dataset(task, backbone, layer, split, **kwargs):
             split=split, backbone=backbone, layer=layer, mode="all", **kwargs
         )
     elif task == "symmetry":
+        # Pass image_type directly if available
+        image_type = kwargs.pop("image_type", "synthetic")
         return FeatureSymmetryDataset(
-            split=split, backbone=backbone, layer=layer, **kwargs
+            split=split, backbone=backbone, layer=layer, image_type=image_type, **kwargs
         )
     elif task == "normals":
         return FeatureNormalsDataset(
@@ -93,6 +95,13 @@ def main():
     parser.add_argument("--batch_size", type=int, default=32)
     parser.add_argument("--lr", type=float, default=1e-3)
     parser.add_argument(
+        "--image_type",
+        type=str,
+        default="syn-syn",
+        choices=["syn-syn", "syn-wild", "wild-wild", "wild"],
+        help="Type of images to train on. For rotation: syn-syn, syn-wild, wild-wild. For symmetry: synthetic, wild.",
+    )
+    parser.add_argument(
         "--device", type=str, default="cuda" if torch.cuda.is_available() else "cpu"
     )
     parser.add_argument(
@@ -118,8 +127,12 @@ def main():
         f"Loading {args.task} dataset with {args.backbone} features ({args.layer})...",
         flush=True,
     )
-    train_ds = get_dataset(args.task, args.backbone, args.layer, "train")
-    val_ds = get_dataset(args.task, args.backbone, args.layer, "val")
+    train_ds = get_dataset(
+        args.task, args.backbone, args.layer, "train", image_type=args.image_type
+    )
+    val_ds = get_dataset(
+        args.task, args.backbone, args.layer, "val", image_type=args.image_type
+    )
 
     train_loader = DataLoader(
         train_ds, batch_size=args.batch_size, shuffle=True, num_workers=4

@@ -69,8 +69,9 @@ def get_dataset(task, backbone, layer, split, **kwargs):
             split=split, backbone=backbone, layer=layer, mode="all", **kwargs
         )
     elif task == "symmetry":
+        image_type = kwargs.pop("image_type", "synthetic")
         return FeatureSymmetryDataset(
-            split=split, backbone=backbone, layer=layer, **kwargs
+            split=split, backbone=backbone, layer=layer, image_type=image_type, **kwargs
         )
     elif task == "normals":
         return FeatureNormalsDataset(
@@ -127,6 +128,13 @@ def main():
     )
     parser.add_argument("--batch_size", type=int, default=32)
     parser.add_argument(
+        "--image_type",
+        type=str,
+        default="syn-syn",
+        choices=["syn-syn", "syn-wild", "wild-wild", "wild"],
+        help="Type of images to evaluate on. For rotation: syn-syn, syn-wild, wild-wild. For symmetry: synthetic, wild.",
+    )
+    parser.add_argument(
         "--device", type=str, default="cuda" if torch.cuda.is_available() else "cpu"
     )
     parser.add_argument(
@@ -144,7 +152,9 @@ def main():
     print(
         f"Loading {args.task} test dataset with {args.backbone} features ({args.layer})..."
     )
-    test_ds = get_dataset(args.task, args.backbone, args.layer, "test")
+    test_ds = get_dataset(
+        args.task, args.backbone, args.layer, "test", image_type=args.image_type
+    )
     test_loader = DataLoader(
         test_ds, batch_size=args.batch_size, shuffle=False, num_workers=4
     )
